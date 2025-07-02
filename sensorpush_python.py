@@ -6,19 +6,43 @@ import csv
 import os
 from datetime import datetime
 from bleak import BleakClient, BleakScanner
+from supabase import create_client, Client
 
-CHARACTERISTICS = {
-    "EF090080-11D6-42BA-93B8-9DD7EC090AA9": "Temperature (°C)",
-    "EF090081-11D6-42BA-93B8-9DD7EC090AA9": "Relative Humidity (%)",
-    "EF090082-11D6-42BA-93B8-9DD7EC090AA9": "Barometric Pressure (Pa)",
-    "EF090007-11D6-42BA-93B8-9DD7EC090AA9": "Battery Voltage (mV)",
-}
+from config import SUPABASE_KEY, SUPABASE_URL, CHARACTERISTICS, TEMPERATURE_BYTE, BATTERY_BYTE, HUMDITY_BYTE, PRESSURE_BYTE
 
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+# Write to Supabase
+def write_to_supabase(data):
+    """Writes a row of sensor data to the Supabase table."""
+    payload = {
+        "timestamp": datetime.now().isoformat(),
+        "temperature_c": data.get("Temperature (°C)"),
+        "humidity_percent": data.get("Relative Humidity (%)"),
+        "pressure_pa": data.get("Barometric Pressure (Pa)"),
+        "battery_voltage_mv": data.get("Battery Voltage (mV)")
+            if isinstance(data.get("Battery Voltage (mV)"), (int, float))
+            else float(data.get("Battery Voltage (mV)").split()[0]) * 1000
+            if data.get("Battery Voltage (mV)") else None,
+    }
+
+
+    response = (
+        supabase.table("sensor_data")
+        .insert(payload)
+        .execute()
+    )
+    print(response)
 
 def get_csv_filename():
     """Generates a CSV filename based on the current date and hour."""
+
+    if not os.path.exists('data'):
+        os.mkdir('data')
+
     now = datetime.now()
-    return f"sensor_data_{now.strftime('%Y-%m-%d_%H')}.csv"
+    return f"data/sensor_data_{now.strftime('%Y-%m-%d_%H')}.csv"
 
 
 def write_to_csv(data):
@@ -64,13 +88,13 @@ async def read_sensor_data(sensor_name):
                 data = await client.read_gatt_char(char_uuid)
 
                 # Process data based on characteristic type
-                if char_uuid == "EF090080-11D6-42BA-93B8-9DD7EC090AA9":  # Temperature
+                if char_uuid == TEMPERATURE_BYTE:  # Temperature
                     value = int.from_bytes(data, byteorder="little", signed=True) / 100
-                elif char_uuid == "EF090081-11D6-42BA-93B8-9DD7EC090AA9":  # Humidity
+                elif char_uuid == HUMDITY_BYTE:  # Humidity
                     value = int.from_bytes(data, byteorder="little", signed=True) / 100
-                elif char_uuid == "EF090082-11D6-42BA-93B8-9DD7EC090AA9":  # Pressure
+                elif char_uuid == PRESSURE_BYTE:  # Pressure
                     value = int.from_bytes(data, byteorder="little", signed=False) / 100
-                elif char_uuid == "EF090007-11D6-42BA-93B8-9DD7EC090AA9":  # Battery
+                elif char_uuid == BATTERY_BYTE:  # Battery
                     battery_voltage = (
                         int.from_bytes(data[:2], byteorder="little", signed=False)
                         / 1000
@@ -93,6 +117,10 @@ async def read_sensor_data(sensor_name):
         # Write the data to CSV
         write_to_csv(results)
         print(f"Data written to {get_csv_filename()}")
+
+        # Write to Supabase table
+        write_to_supabase(results)
+        print("Data written to sensor-push table")
 
 
 def simulate_sensor_data():
@@ -117,6 +145,9 @@ def simulate_sensor_data():
             write_to_csv(simulated_data)
             print(f"Simulated data written to {get_csv_filename()}")
 
+            # Write simulated data to CSV
+            write_to_supabase(simulated_data)
+
             time.sleep(10)  # Simulating data every 10 seconds
     except KeyboardInterrupt:
         print("Simulation stopped.")
@@ -134,4 +165,3 @@ if __name__ == "__main__":
     else:
         sensor_name = "SensorPush HTP.xw DD6"  # Adjust sensor name as needed
         asyncio.run(read_sensor_data(sensor_name))
-
