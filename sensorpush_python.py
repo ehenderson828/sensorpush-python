@@ -33,7 +33,7 @@ def write_to_supabase(data):
         .insert(payload)
         .execute()
     )
-    print(response)
+    print(f"Data written to supahbase")
 
 def get_csv_filename():
     """Generates a CSV filename based on the current date and hour."""
@@ -43,6 +43,16 @@ def get_csv_filename():
 
     now = datetime.now()
     return f"data/sensor_data_{now.strftime('%Y-%m-%d_%H')}.csv"
+ 
+
+def write_data(data, args):
+    if args.local:
+        # Write simulated data to CSV
+        write_to_csv(data)
+        print(f"Simulated data written to {get_csv_filename()}")
+    else:
+        # Write simulated data to CSV
+        write_to_supabase(data)
 
 
 def write_to_csv(data):
@@ -61,7 +71,7 @@ def write_to_csv(data):
         writer.writerow([datetime.now().isoformat()] + list(data.values()))
 
 
-async def read_sensor_data(sensor_name):
+async def read_sensor_data(sensor_name, args):
     """Reads real data from the BLE sensor and writes it to a CSV file."""
     print("Scanning for devices...")
     devices = await BleakScanner.discover()
@@ -114,39 +124,29 @@ async def read_sensor_data(sensor_name):
         for desc, val in results.items():
             print(f"{desc}: {val}")
 
-        # Write the data to CSV
-        write_to_csv(results)
-        print(f"Data written to {get_csv_filename()}")
+        write_data(results, args)
 
-        # Write to Supabase table
-        write_to_supabase(results)
-        print("Data written to sensor-push table")
-
-
-def simulate_sensor_data():
+def simulate_sensor_data(args):
     """Simulates sensor data readings at the same cadence and writes to a CSV file."""
     print("\nSimulating sensor data... (Press Ctrl+C to stop)\n")
     try:
         while True:
-            simulated_data = {
+            data = {
                 "Temperature (°C)": round(random.uniform(15, 30), 2),
                 "Relative Humidity (%)": round(random.uniform(40, 70), 2),
                 "Barometric Pressure (Pa)": round(random.uniform(99000, 102000), 2),
                 "Battery Voltage (mV)": round(random.uniform(3.5, 4.2), 3),
+                # simulated
+                #
             }
 
             print(f"[{datetime.now().isoformat()}] Simulated Data:")
-            for key, value in simulated_data.items():
+            for key, value in data.items():
                 print(f"{key}: {value}")
 
             print("\n---\n")
 
-            # Write simulated data to CSV
-            write_to_csv(simulated_data)
-            print(f"Simulated data written to {get_csv_filename()}")
-
-            # Write simulated data to CSV
-            write_to_supabase(simulated_data)
+            write_data(data, args)
 
             time.sleep(10)  # Simulating data every 10 seconds
     except KeyboardInterrupt:
@@ -158,10 +158,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--simulate", action="store_true", help="Run in simulation mode instead of reading real sensor data."
     )
+    parser.add_argument(
+        "--local", action="store_true", help="Run in local mode instead of writing data.", default=False
+    )
     args = parser.parse_args()
 
     if args.simulate:
-        simulate_sensor_data()
+        simulate_sensor_data(args)
     else:
         sensor_name = "SensorPush HTP.xw DD6"  # Adjust sensor name as needed
-        asyncio.run(read_sensor_data(sensor_name))
+        asyncio.run(read_sensor_data(sensor_name, args))
