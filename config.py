@@ -1,4 +1,7 @@
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 TEMPERATURE_BYTE = "EF090080-11D6-42BA-93B8-9DD7EC090AA9"
