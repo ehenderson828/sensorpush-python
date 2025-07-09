@@ -12,6 +12,20 @@ from config import SUPABASE_KEY, SUPABASE_URL, CHARACTERISTICS, TEMPERATURE_BYTE
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# Find sensor function
+async def find_sensor(sensor_name):
+    """Scans for BLE devices and returns the first match for the given name."""
+    print("Scanning for devices...")
+
+    devices = await BleakScanner.discover()
+
+    for device in devices:
+        if device.name and sensor_name in device.name:
+            print(f"Found sensor: {device.name}")
+            return device
+
+    print(f"Sensor with name containing '{sensor_name}' not found.")
+    return None
 
 # Write to Supabase
 def write_to_supabase(data):
@@ -25,6 +39,7 @@ def write_to_supabase(data):
             if isinstance(data.get("Battery Voltage (mV)"), (int, float))
             else float(data.get("Battery Voltage (mV)").split()[0]) * 1000
             if data.get("Battery Voltage (mV)") else None,
+        "device_name": data.get("device_name")
     }
 
 
@@ -33,7 +48,7 @@ def write_to_supabase(data):
         .insert(payload)
         .execute()
     )
-    print(f"Data written to supahbase")
+    print(f"Data written to Supabase")
 
 def get_csv_filename():
     """Generates a CSV filename based on the current date and hour."""
@@ -73,13 +88,8 @@ def write_to_csv(data):
 
 async def read_sensor_data(sensor_name, args):
     """Reads real data from the BLE sensor and writes it to a CSV file."""
-    print("Scanning for devices...")
-    devices = await BleakScanner.discover()
-
-    sensor_device = next((d for d in devices if d.name and sensor_name in d.name), None)
-
+    sensor_device = await find_sensor(sensor_name)
     if not sensor_device:
-        print(f"Sensor with name containing '{sensor_name}' not found.")
         return
 
     print(f"Found sensor: {sensor_device.name}")
@@ -120,6 +130,9 @@ async def read_sensor_data(sensor_name, args):
             except Exception as e:
                 print(f"Failed to read {description}: {e}")
 
+        # Add device name to results for Supabase
+        results["device_name"] = sensor_device.name
+
         print("\nSensor Readings:")
         for desc, val in results.items():
             print(f"{desc}: {val}")
@@ -137,8 +150,10 @@ def simulate_sensor_data(args):
                 "Barometric Pressure (Pa)": round(random.uniform(99000, 102000), 2),
                 "Battery Voltage (mV)": round(random.uniform(3.5, 4.2), 3),
                 # simulated
-                #
             }
+
+            # Add simulated device name
+            data["device_name"] = "SimulatedSensor-1"
 
             print(f"[{datetime.now().isoformat()}] Simulated Data:")
             for key, value in data.items():
