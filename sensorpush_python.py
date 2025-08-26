@@ -5,11 +5,43 @@ import time
 import csv
 import os
 import logging
+import sys
+import atexit
 from datetime import datetime
 from bleak import BleakClient, BleakScanner
 from supabase import create_client, Client
 
 from config import SUPABASE_KEY, SUPABASE_URL, CHARACTERISTICS, TEMPERATURE_BYTE, BATTERY_BYTE, HUMDITY_BYTE, PRESSURE_BYTE
+
+# Single instance check
+LOCKFILE = "/tmp/sensor_script.lock"
+
+def remove_lock():
+    if os.path.exists(LOCKFILE):
+        os.remove(LOCKFILE)
+
+if os.path.exists(LOCKFILE):
+    try:
+        with open(LOCKFILE, "r") as f:
+            pid = int(f.read())
+        os.kill(pid, 0)  # Check if process is still running
+        print("Another instance of the script is already running. Exiting.")
+        sys.exit(1)
+    except ValueError:
+        print("Lockfile corrupted. Removing stale lockfile.")
+        os.remove(LOCKFILE)
+    except ProcessLookupError:
+        print("Stale lockfile found. Removing it.")
+        os.remove(LOCKFILE)
+    except PermissionError:
+        print(f"Cannot check PID {pid}. Exiting for safety.")
+        sys.exit(1)
+
+with open(LOCKFILE, "w") as f:
+    f.write(str(os.getpid()))
+
+atexit.register(remove_lock)
+# --- End of lockfile logic ---
 
 # Configure logging
 logging.basicConfig(
@@ -22,7 +54,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Supabase client configuration
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def filter_sensor_data(data: dict) -> dict:
+    """Remove None or empty values from sensor data before writing."""
+    return {k: v for k, v in data.items() if v not in (None, "", "NaN")}
 
 # Find sensor function
 async def find_sensor(sensor_name):
@@ -160,7 +197,14 @@ async def read_sensor_data(sensor_name, args):
             for desc, val in results.items():
                 logger.info(f"  {desc}: {val}")
 
-            write_data(results, args)
+            # Filter null/invalid values before writing
+            cleaned_results = filter_sensor_data(results)
+
+            if cleaned_results:  # only write if there's at least one valid value
+                write_data(cleaned_results, args)
+            else:
+                logger.warning("Skipping write: no valid sensor data found")
+
     except Exception as e:
         logger.error(f"Failed to connect to sensor or read data: {e}")
 
@@ -185,7 +229,13 @@ def simulate_sensor_data(args):
 
             logger.info("---")
 
-            write_data(data, args)
+            # Filter null/invalid values before writing
+            cleaned_data = filter_sensor_data(data)
+
+            if cleaned_data:
+                write_data(cleaned_data, args)
+            else:
+                logger.warning("Skipping write: no valid simulated data")
 
             time.sleep(10)  # Simulating data every 10 seconds
     except KeyboardInterrupt:
@@ -212,7 +262,10 @@ if __name__ == "__main__":
             simulate_sensor_data(args)
         else:
             sensor_name = "SensorPush HTP.xw DD6"  # Adjust sensor name as needed
-            asyncio.run(read_sensor_data(sensor_name, args))
+            while True:
+                asyncio.run(read_sensor_data(sensor_name, args))
+                logger.info("Sleeping 15 minutes before next reading...")
+                time.sleep(15 * 60) # 15 minute sleep time
     except Exception as e:
         logger.error(f"Fatal error: {e}")
     finally:
