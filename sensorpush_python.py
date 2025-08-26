@@ -4,27 +4,76 @@ import random
 import time
 import csv
 import os
+import logging
+import sys
+import atexit
 from datetime import datetime
 from bleak import BleakClient, BleakScanner
 from supabase import create_client, Client
 
 from config import SUPABASE_KEY, SUPABASE_URL, CHARACTERISTICS, TEMPERATURE_BYTE, BATTERY_BYTE, HUMDITY_BYTE, PRESSURE_BYTE
 
+# Single instance check
+LOCKFILE = "/tmp/sensor_script.lock"
+
+def remove_lock():
+    if os.path.exists(LOCKFILE):
+        os.remove(LOCKFILE)
+
+if os.path.exists(LOCKFILE):
+    try:
+        with open(LOCKFILE, "r") as f:
+            pid = int(f.read())
+        os.kill(pid, 0)  # Check if process is still running
+        print("Another instance of the script is already running. Exiting.")
+        sys.exit(1)
+    except ValueError:
+        print("Lockfile corrupted. Removing stale lockfile.")
+        os.remove(LOCKFILE)
+    except ProcessLookupError:
+        print("Stale lockfile found. Removing it.")
+        os.remove(LOCKFILE)
+    except PermissionError:
+        print(f"Cannot check PID {pid}. Exiting for safety.")
+        sys.exit(1)
+
+with open(LOCKFILE, "w") as f:
+    f.write(str(os.getpid()))
+
+atexit.register(remove_lock)
+# --- End of lockfile logic ---
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('sensor.log'),
+        logging.StreamHandler()  # Also output to console
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Supabase client configuration
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def filter_sensor_data(data: dict) -> dict:
+    """Remove None or empty values from sensor data before writing."""
+    return {k: v for k, v in data.items() if v not in (None, "", "NaN")}
 
 # Find sensor function
 async def find_sensor(sensor_name):
     """Scans for BLE devices and returns the first match for the given name."""
-    print("Scanning for devices...")
+    logger.info("Scanning for devices...")
 
     devices = await BleakScanner.discover()
 
     for device in devices:
         if device.name and sensor_name in device.name:
-            print(f"Found sensor: {device.name}")
+            logger.info(f"Found sensor: {device.name}")
             return device
 
-    print(f"Sensor with name containing '{sensor_name}' not found.")
+    logger.warning(f"Sensor with name containing '{sensor_name}' not found.")
     return None
 
 # Write to Supabase
@@ -42,19 +91,22 @@ def write_to_supabase(data):
         "device_name": data.get("device_name")
     }
 
-
-    response = (
-        supabase.table("sensor_data")
-        .insert(payload)
-        .execute()
-    )
-    print(f"Data written to Supabase")
+    try:
+        response = (
+            supabase.table("sensor_data")
+            .insert(payload)
+            .execute()
+        )
+        logger.info("Data written to Supabase successfully")
+    except Exception as e:
+        logger.error(f"Failed to write data to Supabase: {e}")
 
 def get_csv_filename():
     """Generates a CSV filename based on the current date and hour."""
 
     if not os.path.exists('data'):
         os.mkdir('data')
+        logger.info("Created 'data' directory")
 
     now = datetime.now()
     return f"data/sensor_data_{now.strftime('%Y-%m-%d_%H')}.csv"
@@ -62,11 +114,11 @@ def get_csv_filename():
 
 def write_data(data, args):
     if args.local:
-        # Write simulated data to CSV
+        # Write data to CSV
         write_to_csv(data)
-        print(f"Simulated data written to {get_csv_filename()}")
+        logger.info(f"Data written to {get_csv_filename()}")
     else:
-        # Write simulated data to CSV
+        # Write data to Supabase
         write_to_supabase(data)
 
 
@@ -75,73 +127,90 @@ def write_to_csv(data):
     filename = get_csv_filename()
     file_exists = os.path.isfile(filename)
 
-    with open(filename, mode="a", newline="") as file:
-        writer = csv.writer(file)
+    try:
+        with open(filename, mode="a", newline="") as file:
+            writer = csv.writer(file)
 
-        # Write header if the file is new
-        if not file_exists:
-            writer.writerow(["Timestamp"] + list(data.keys()))
+            # Write header if the file is new
+            if not file_exists:
+                writer.writerow(["Timestamp"] + list(data.keys()))
+                logger.info(f"Created new CSV file: {filename}")
 
-        # Write the data row
-        writer.writerow([datetime.now().isoformat()] + list(data.values()))
+            # Write the data row
+            writer.writerow([datetime.now().isoformat()] + list(data.values()))
+    except Exception as e:
+        logger.error(f"Failed to write to CSV file {filename}: {e}")
 
 
 async def read_sensor_data(sensor_name, args):
     """Reads real data from the BLE sensor and writes it to a CSV file."""
     sensor_device = await find_sensor(sensor_name)
     if not sensor_device:
+        logger.error("No sensor device found, exiting")
         return
 
-    print(f"Found sensor: {sensor_device.name}")
-    async with BleakClient(sensor_device) as client:
-        print("Connected to the sensor.")
-        results = {}
+    logger.info(f"Found sensor: {sensor_device.name}")
+    
+    try:
+        async with BleakClient(sensor_device) as client:
+            logger.info("Connected to the sensor")
+            results = {}
 
-        for char_uuid, description in CHARACTERISTICS.items():
-            try:
-                # Trigger a new reading for sensor values
-                if char_uuid in CHARACTERISTICS.keys():
-                    write_value = bytearray([0x01, 0x00, 0x00, 0x00])
-                    await client.write_gatt_char(char_uuid, write_value)
+            for char_uuid, description in CHARACTERISTICS.items():
+                try:
+                    # Trigger a new reading for sensor values
+                    if char_uuid in CHARACTERISTICS.keys():
+                        write_value = bytearray([0x01, 0x00, 0x00, 0x00])
+                        await client.write_gatt_char(char_uuid, write_value)
 
-                # Read the characteristic value
-                data = await client.read_gatt_char(char_uuid)
+                    # Read the characteristic value
+                    data = await client.read_gatt_char(char_uuid)
 
-                # Process data based on characteristic type
-                if char_uuid == TEMPERATURE_BYTE:  # Temperature
-                    value = int.from_bytes(data, byteorder="little", signed=True) / 100
-                elif char_uuid == HUMDITY_BYTE:  # Humidity
-                    value = int.from_bytes(data, byteorder="little", signed=True) / 100
-                elif char_uuid == PRESSURE_BYTE:  # Pressure
-                    value = int.from_bytes(data, byteorder="little", signed=False) / 100
-                elif char_uuid == BATTERY_BYTE:  # Battery
-                    battery_voltage = (
-                        int.from_bytes(data[:2], byteorder="little", signed=False)
-                        / 1000
-                    )
-                    temperature = (
-                        int.from_bytes(data[2:], byteorder="little", signed=True) / 100
-                    )
-                    value = f"{battery_voltage:.3f} V (Temperature: {temperature:.2f}°C)"
-                else:
-                    value = data.hex()
+                    # Process data based on characteristic type
+                    if char_uuid == TEMPERATURE_BYTE:  # Temperature
+                        value = int.from_bytes(data, byteorder="little", signed=True) / 100
+                    elif char_uuid == HUMDITY_BYTE:  # Humidity
+                        value = int.from_bytes(data, byteorder="little", signed=True) / 100
+                    elif char_uuid == PRESSURE_BYTE:  # Pressure
+                        value = int.from_bytes(data, byteorder="little", signed=False) / 100
+                    elif char_uuid == BATTERY_BYTE:  # Battery
+                        battery_voltage = (
+                            int.from_bytes(data[:2], byteorder="little", signed=False)
+                            / 1000
+                        )
+                        temperature = (
+                            int.from_bytes(data[2:], byteorder="little", signed=True) / 100
+                        )
+                        value = f"{battery_voltage:.3f} V (Temperature: {temperature:.2f}°C)"
+                    else:
+                        value = data.hex()
 
-                results[description] = value
-            except Exception as e:
-                print(f"Failed to read {description}: {e}")
+                    results[description] = value
+                    logger.debug(f"Read {description}: {value}")
+                except Exception as e:
+                    logger.error(f"Failed to read {description}: {e}")
 
-        # Add device name to results for Supabase
-        results["device_name"] = sensor_device.name
+            # Add device name to results for Supabase
+            results["device_name"] = sensor_device.name
 
-        print("\nSensor Readings:")
-        for desc, val in results.items():
-            print(f"{desc}: {val}")
+            logger.info("Sensor Readings:")
+            for desc, val in results.items():
+                logger.info(f"  {desc}: {val}")
 
-        write_data(results, args)
+            # Filter null/invalid values before writing
+            cleaned_results = filter_sensor_data(results)
+
+            if cleaned_results:  # only write if there's at least one valid value
+                write_data(cleaned_results, args)
+            else:
+                logger.warning("Skipping write: no valid sensor data found")
+
+    except Exception as e:
+        logger.error(f"Failed to connect to sensor or read data: {e}")
 
 def simulate_sensor_data(args):
     """Simulates sensor data readings at the same cadence and writes to a CSV file."""
-    print("\nSimulating sensor data... (Press Ctrl+C to stop)\n")
+    logger.info("Starting sensor data simulation... (Press Ctrl+C to stop)")
     try:
         while True:
             data = {
@@ -149,23 +218,30 @@ def simulate_sensor_data(args):
                 "Relative Humidity (%)": round(random.uniform(40, 70), 2),
                 "Barometric Pressure (Pa)": round(random.uniform(99000, 102000), 2),
                 "Battery Voltage (mV)": round(random.uniform(3.5, 4.2), 3),
-                # simulated
             }
 
             # Add simulated device name
             data["device_name"] = "SimulatedSensor-1"
 
-            print(f"[{datetime.now().isoformat()}] Simulated Data:")
+            logger.info("Simulated Data:")
             for key, value in data.items():
-                print(f"{key}: {value}")
+                logger.info(f"  {key}: {value}")
 
-            print("\n---\n")
+            logger.info("---")
 
-            write_data(data, args)
+            # Filter null/invalid values before writing
+            cleaned_data = filter_sensor_data(data)
+
+            if cleaned_data:
+                write_data(cleaned_data, args)
+            else:
+                logger.warning("Skipping write: no valid simulated data")
 
             time.sleep(10)  # Simulating data every 10 seconds
     except KeyboardInterrupt:
-        print("Simulation stopped.")
+        logger.info("Simulation stopped by user")
+    except Exception as e:
+        logger.error(f"Error during simulation: {e}")
 
 
 if __name__ == "__main__":
@@ -178,8 +254,19 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if args.simulate:
-        simulate_sensor_data(args)
-    else:
-        sensor_name = "SensorPush HTP.xw DD6"  # Adjust sensor name as needed
-        asyncio.run(read_sensor_data(sensor_name, args))
+    logger.info("Starting sensor script")
+    logger.info(f"Arguments: simulate={args.simulate}, local={args.local}")
+
+    try:
+        if args.simulate:
+            simulate_sensor_data(args)
+        else:
+            sensor_name = "SensorPush HTP.xw DD6"  # Adjust sensor name as needed
+            while True:
+                asyncio.run(read_sensor_data(sensor_name, args))
+                logger.info("Sleeping 15 minutes before next reading...")
+                time.sleep(15 * 60) # 15 minute sleep time
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+    finally:
+        logger.info("Sensor script finished")
