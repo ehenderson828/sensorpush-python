@@ -142,7 +142,7 @@ def write_to_csv(data):
         logger.error(f"Failed to write to CSV file {filename}: {e}")
 
 
-async def read_sensor_data(sensor_name, args):
+async def read_sensor_data(sensor_name, args, retries=5, delay=10):
     """Reads real data from the BLE sensor and writes it to a CSV file."""
     sensor_device = await find_sensor(sensor_name)
     if not sensor_device:
@@ -150,63 +150,67 @@ async def read_sensor_data(sensor_name, args):
         return
 
     logger.info(f"Found sensor: {sensor_device.name}")
-    
-    try:
-        async with BleakClient(sensor_device) as client:
-            logger.info("Connected to the sensor")
-            results = {}
 
-            for char_uuid, description in CHARACTERISTICS.items():
-                try:
-                    # Trigger a new reading for sensor values
-                    if char_uuid in CHARACTERISTICS.keys():
-                        write_value = bytearray([0x01, 0x00, 0x00, 0x00])
-                        await client.write_gatt_char(char_uuid, write_value)
+    attempt = 0
+    while attempt < retries:
+        try:
+            async with BleakClient(sensor_device) as client:
+                logger.info("Connected to the sensor")
+                results = {}
 
-                    # Read the characteristic value
-                    data = await client.read_gatt_char(char_uuid)
+                for char_uuid, description in CHARACTERISTICS.items():
+                    try:
+                        # Trigger a new reading
+                        if char_uuid in CHARACTERISTICS.keys():
+                            write_value = bytearray([0x01, 0x00, 0x00, 0x00])
+                            await client.write_gatt_char(char_uuid, write_value)
 
-                    # Process data based on characteristic type
-                    if char_uuid == TEMPERATURE_BYTE:  # Temperature
-                        value = int.from_bytes(data, byteorder="little", signed=True) / 100
-                    elif char_uuid == HUMDITY_BYTE:  # Humidity
-                        value = int.from_bytes(data, byteorder="little", signed=True) / 100
-                    elif char_uuid == PRESSURE_BYTE:  # Pressure
-                        value = int.from_bytes(data, byteorder="little", signed=False) / 100
-                    elif char_uuid == BATTERY_BYTE:  # Battery
-                        battery_voltage = (
-                            int.from_bytes(data[:2], byteorder="little", signed=False)
-                            / 1000
-                        )
-                        temperature = (
-                            int.from_bytes(data[2:], byteorder="little", signed=True) / 100
-                        )
-                        value = f"{battery_voltage:.3f} V (Temperature: {temperature:.2f}°C)"
-                    else:
-                        value = data.hex()
+                        # Read the characteristic value
+                        data = await client.read_gatt_char(char_uuid)
 
-                    results[description] = value
-                    logger.debug(f"Read {description}: {value}")
-                except Exception as e:
-                    logger.error(f"Failed to read {description}: {e}")
+                        # Process data based on characteristic type
+                        if char_uuid == TEMPERATURE_BYTE:
+                            value = int.from_bytes(data, byteorder="little", signed=True) / 100
+                        elif char_uuid == HUMDITY_BYTE:
+                            value = int.from_bytes(data, byteorder="little", signed=True) / 100
+                        elif char_uuid == PRESSURE_BYTE:
+                            value = int.from_bytes(data, byteorder="little", signed=False) / 100
+                        elif char_uuid == BATTERY_BYTE:
+                            battery_voltage = (
+                                int.from_bytes(data[:2], byteorder="little", signed=False) / 1000
+                            )
+                            temperature = (
+                                int.from_bytes(data[2:], byteorder="little", signed=True) / 100
+                            )
+                            value = f"{battery_voltage:.3f} V (Temperature: {temperature:.2f}°C)"
+                        else:
+                            value = data.hex()
 
-            # Add device name to results for Supabase
-            results["device_name"] = sensor_device.name
+                        results[description] = value
+                        logger.debug(f"Read {description}: {value}")
+                    except Exception as e:
+                        logger.error(f"Failed to read {description}: {e}")
 
-            logger.info("Sensor Readings:")
-            for desc, val in results.items():
-                logger.info(f"  {desc}: {val}")
+                results["device_name"] = sensor_device.name
 
-            # Filter null/invalid values before writing
-            cleaned_results = filter_sensor_data(results)
+                # Filter null/invalid values before writing
+                cleaned_results = filter_sensor_data(results)
 
-            if cleaned_results:  # only write if there's at least one valid value
-                write_data(cleaned_results, args)
+                if cleaned_results:
+                    write_data(cleaned_results, args)
+                else:
+                    logger.warning("Skipping write: no valid sensor data found")
+
+                return  # Success — exit retry loop
+
+        except (BrokenPipeError, EOFError, Exception) as e:
+            attempt += 1
+            logger.error(f"Error on attempt {attempt}/{retries}: {e}")
+            if attempt < retries:
+                logger.info(f"Retrying in {delay} seconds...")
+                await asyncio.sleep(delay)
             else:
-                logger.warning("Skipping write: no valid sensor data found")
-
-    except Exception as e:
-        logger.error(f"Failed to connect to sensor or read data: {e}")
+                logger.error("Max retries reached, giving up on this cycle")
 
 def simulate_sensor_data(args):
     """Simulates sensor data readings at the same cadence and writes to a CSV file."""
