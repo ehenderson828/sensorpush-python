@@ -33,6 +33,13 @@ sed -e "s|{{USER}}|$SERVICE_USER|g" \
     -e "s|{{PYTHON}}|$PYTHON|g" \
     "$UNIT_SRC" > "$UNIT_DST"
 
+# Stop any old nohup-started instance so it doesn't run alongside the service
+systemctl stop sensorpush.service 2>/dev/null || true
+if pkill -f "[s]ensorpush_python.py"; then
+    echo "Stopped previously running sensorpush_python.py process(es)"
+fi
+rm -f /tmp/sensor_script.lock
+
 systemctl daemon-reload
 systemctl enable --now sensorpush.service
 
