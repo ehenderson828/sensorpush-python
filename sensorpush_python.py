@@ -5,43 +5,11 @@ import time
 import csv
 import os
 import logging
-import sys
-import atexit
 from datetime import datetime
 from bleak import BleakClient, BleakScanner
 from supabase import create_client, Client
 
 from config import SUPABASE_KEY, SUPABASE_URL, CHARACTERISTICS, TEMPERATURE_BYTE, BATTERY_BYTE, HUMDITY_BYTE, PRESSURE_BYTE
-
-# Single instance check
-LOCKFILE = "/tmp/sensor_script.lock"
-
-def remove_lock():
-    if os.path.exists(LOCKFILE):
-        os.remove(LOCKFILE)
-
-if os.path.exists(LOCKFILE):
-    try:
-        with open(LOCKFILE, "r") as f:
-            pid = int(f.read())
-        os.kill(pid, 0)  # Check if process is still running
-        print("Another instance of the script is already running. Exiting.")
-        sys.exit(1)
-    except ValueError:
-        print("Lockfile corrupted. Removing stale lockfile.")
-        os.remove(LOCKFILE)
-    except ProcessLookupError:
-        print("Stale lockfile found. Removing it.")
-        os.remove(LOCKFILE)
-    except PermissionError:
-        print(f"Cannot check PID {pid}. Exiting for safety.")
-        sys.exit(1)
-
-with open(LOCKFILE, "w") as f:
-    f.write(str(os.getpid()))
-
-atexit.register(remove_lock)
-# --- End of lockfile logic ---
 
 # Configure logging
 logging.basicConfig(

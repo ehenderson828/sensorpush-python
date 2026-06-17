@@ -1,0 +1,26 @@
+[Unit]
+Description=SensorPush BLE reader (writes readings to Supabase)
+# Needs BlueZ up for BLE scanning and the network up to reach Supabase
+After=network-online.target bluetooth.service
+Wants=network-online.target
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+User={{USER}}
+WorkingDirectory={{WORKDIR}}
+# .env (SUPABASE_URL / SUPABASE_KEY) is loaded by config.py from WorkingDirectory
+ExecStart={{PYTHON}} {{WORKDIR}}/sensorpush_python.py
+
+# Keep the service alive: restart on crash, throttle if it's crash-looping
+Restart=always
+RestartSec=30
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# stdout/stderr go to the journal: journalctl -u sensorpush -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
